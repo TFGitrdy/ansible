@@ -1,0 +1,7 @@
+---
+- name: Install k8s collection
+  hosts: masters
+  become: yes
+  tasks:
+    - name: Install k8s collection via ansible-galaxy
+      command: ansible-galaxy collection install kubernetes.core
