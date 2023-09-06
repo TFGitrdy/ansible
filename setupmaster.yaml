@@ -24,7 +24,7 @@
 
     - name: Set PATH and KUBECONFIG for kubectl
       lineinfile:
-        path: "~/.bashrc"
+        path: "/home/MasterNode/.bashrc"
         line: "{{ item }}"
         create: yes  # This will create the file if it doesn't exist
       loop:
@@ -111,3 +111,36 @@
 
     - name: Update Helm repos
       command: helm repo update
+    - name: Replace the Rancher Service
+      kubernetes.core.k8s:
+        state: present
+        force: yes
+        kubeconfig: /etc/rancher/rke2/rke2.yaml
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            annotations:
+              meta.helm.sh/release-name: rancher
+              meta.helm.sh/release-namespace: cattle-system
+            labels:
+              app: rancher
+              app.kubernetes.io/managed-by: Helm
+              chart: rancher-2.7.5
+              heritage: Helm
+              release: rancher
+            name: rancher
+            namespace: cattle-system
+          spec:
+            type: NodePort
+            ports:
+              - name: http
+                port: 80
+                targetPort: 80
+                nodePort: 30080
+              - name: https-internal
+                port: 443
+                targetPort: 444
+                nodePort: 30443
+            selector:
+              app: rancher
