@@ -1,57 +1,67 @@
 ---
 - name: Setup Kubernetes Master Node
   hosts: masters
+  become: yes  # This will handle the sudo requirement for the entire playbook
+  vars:
+    kubeconfig_path: /etc/rancher/rke2/rke2.yaml
   tasks:
-    - name: get update
-      command: sudo apt-get update
+    - name: Update apt cache
+      apt:
+        update_cache: yes
 
-    - name: install pip3
-      command: sudo apt-get install python3-pip -y
+    - name: Ensure pip3 is installed
+      apt:
+        name: python3-pip
+        state: present
 
-    - name: install pre-requisites
+    - name: Install pre-requisites
       pip:
         name:
           - openshift
           - pyyaml
           - kubernetes
+        executable: pip3
 
     - name: Set PATH and KUBECONFIG for kubectl
       lineinfile:
         path: "~/.bashrc"
         line: "{{ item }}"
-      with_items:
+        create: yes  # This will create the file if it doesn't exist
+      loop:
         - "export PATH=$PATH:/var/lib/rancher/rke2/bin/"
         - "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
 
     - name: Adjust permissions for kubectl config
       file:
-        path: /etc/rancher/rke2/rke2.yaml
-        mode: '0644'
+        path: "{{ kubeconfig_path }}"
+        mode: '0600'
 
-    #- name: Create cattle-system namespace
-    #  command: sudo /usr/local/bin/kubectl create namespace cattle-system
-
-    - name: Create a k8s namespace
+    - name: Create cattle-system namespace
       kubernetes.core.k8s:
-        name: testing
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: cattle-system
         api_version: v1
         kind: Namespace
         state: present
+      #  host: https://127.0.0.1:6443
 
-    - name: Download and Install Helm
-      block:
+
+    - name: Check if Helm is installed
+      command: helm version
+      register: helm_version
+      failed_when: false
+      changed_when: false
+
+    - block:
         - name: Download Helm script
           get_url:
             url: https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
             dest: /tmp/get_helm.sh
             mode: '0700'
+        
         - name: Install Helm
           command: /tmp/get_helm.sh
-
-    - name: Check helm version
-      command: helm version
-      register: helm_version
-      changed_when: false
+      when: helm_version.rc != 0  # Execute block only if Helm is not installed
 
     - name: Display helm version
       debug:
@@ -59,22 +69,45 @@
 
     - name: Add jetstack helm repo
       command: helm repo add jetstack https://charts.jetstack.io
+      register: jetstack_result
+      changed_when: "'already exists' not in jetstack_result.stderr"  # To ensure idempotency
 
     - name: Create cert-manager namespace
-      command: /usr/local/bin/kubectl create namespace cert-manager
+      kubernetes.core.k8s:
+        name: cert-manager
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
 
     - name: Install cert-manager with Helm
       command: >
         helm install cert-manager jetstack/cert-manager
+        --kubeconfig {{ kubeconfig_path }}
         --namespace cert-manager
         --version v1.12
         --set installCRDs=true
 
     - name: Add rancher-stable helm repo
       command: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+      register: rancher_result
+      changed_when: "'already exists' not in rancher_result.stderr"  # To ensure idempotency
+
+    - name: Create cattle-system namespace
+      kubernetes.core.k8s:
+        name: cattle-system
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: /etc/rancher/rke2/rke2.yaml
 
     - name: Install Rancher with Helm
       command: >
-        helm install rancher rancher-latest/rancher
+        helm install rancher rancher-stable/rancher
+        --kubeconfig {{ kubeconfig_path }}
+        --set ingress.tls.source=letsEncrypt
         --namespace cattle-system
         --set hostname=rancher.my.org
+
+    - name: Update Helm repos
+      command: helm repo update
