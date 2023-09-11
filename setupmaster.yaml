@@ -146,5 +146,9 @@
             selector:
               app: rancher
 
-    - name: Get Rancher PW
-      command: kubectl get secret --namespace cattle-system bootstrap-secret -o go-template='{{.data.bootstrapPassword|base64decode}}{{"\n"}}'
+    - name: Get Rancher Password
+      shell: /var/lib/rancher/rke2/bin/kubectl get secret --namespace cattle-system bootstrap-secret -o go-template='{% raw %}{{.data.bootstrapPassword|base64decode}}{% endraw %}'
+      register: result
+
+    - debug:
+        var: result.stdout
