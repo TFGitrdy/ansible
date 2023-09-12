@@ -149,7 +149,8 @@
     - name: Get Rancher Password
       shell: /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get secret --namespace cattle-system bootstrap-secret -o go-template='{% raw %}{{.data.bootstrapPassword|base64decode}}{% endraw %}'
       register: result
+      retries: 5
+      delay: 10
+      until: result.rc == 0
       tags:
         - rancherpw
-    - debug:
-        var: result.stdout
