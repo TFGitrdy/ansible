@@ -154,4 +154,8 @@
       until: result.rc == 0
       tags:
         - rancherpw
-
+    - name: Display Rancher Password
+      debug:
+        var: result.stdout
+      tags:
+        - rancherpw
