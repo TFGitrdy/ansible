@@ -1,0 +1,181 @@
+---
+- name: Setup Kubernetes Master Node
+  hosts: masters
+  become: yes  # This will handle the sudo requirement for the entire playbook
+  vars:
+    kubeconfig_path: /etc/rancher/rke2/rke2.yaml
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Ensure pip3 is installed
+      apt:
+        name: python3-pip
+        state: present
+
+    - name: Install pre-requisites
+      pip:
+        name:
+          - openshift
+          - pyyaml
+          - kubernetes
+        executable: pip3
+
+    - name: Set PATH and KUBECONFIG for kubectl
+      lineinfile:
+        path: "/home/MasterNode/.bashrc"
+        line: "{{ item }}"
+        create: yes  # This will create the file if it doesn't exist
+      loop:
+        - "export PATH=$PATH:/var/lib/rancher/rke2/bin/"
+        - "export KUBECONFIG=/etc/rancher/rke2/rke2.yaml"
+
+    - name: Adjust permissions for kubectl config
+      file:
+        path: "{{ kubeconfig_path }}"
+        mode: '0600'
+
+    - name: Create cattle-system namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: cattle-system
+        api_version: v1
+        kind: Namespace
+        state: present
+      #  host: https://127.0.0.1:6443
+
+
+    - name: Check if Helm is installed
+      command: helm version
+      register: helm_version
+      failed_when: false
+      changed_when: false
+
+    - block:
+        - name: Download Helm script
+          get_url:
+            url: https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+            dest: /tmp/get_helm.sh
+            mode: '0700'
+        
+        - name: Install Helm
+          command: /tmp/get_helm.sh
+      when: helm_version.rc != 0  # Execute block only if Helm is not installed
+
+    - name: Display helm version
+      debug:
+        var: helm_version.stdout
+
+    - name: Add jetstack helm repo
+      command: helm repo add jetstack https://charts.jetstack.io
+      register: jetstack_result
+      changed_when: "'already exists' not in jetstack_result.stderr"  # To ensure idempotency
+
+    - name: Create cert-manager namespace
+      kubernetes.core.k8s:
+        name: cert-manager
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: "{{ kubeconfig_path }}"
+    
+    - name: Get the latest Kubernetes version
+      shell: "curl -L -s https://dl.k8s.io/release/stable.txt"
+      register: kubectl_version
+
+    - name: Download kubectl binary
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version.stdout }}/bin/linux/amd64/kubectl"
+        dest: /tmp/kubectl
+        mode: '0755'
+
+    - name: Move kubectl to /usr/local/bin
+      command: mv /tmp/kubectl /usr/local/bin/kubectl
+      become: yes
+
+    - name: Install cert-manager CRDs
+      command: >
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.crds.yaml
+        --kubeconfig {{ kubeconfig_path }}
+
+    - name: Install cert-manager with Helm
+      command: >
+        helm install jetstack/cert-manager \
+        --kubeconfig {{ kubeconfig_path }} \
+        --namespace cert-manager \
+        --version v1.16.2 \
+        --generate-name
+
+
+    - name: Add rancher-stable helm repo
+      command: helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+      register: rancher_result
+      changed_when: "'already exists' not in rancher_result.stderr"  # To ensure idempotency
+
+    - name: Create cattle-system namespace
+      kubernetes.core.k8s:
+        name: cattle-system
+        api_version: v1
+        kind: Namespace
+        state: present
+        kubeconfig: /etc/rancher/rke2/rke2.yaml
+
+    - name: Install Rancher with Helm
+      command: >
+        helm install rancher rancher-stable/rancher
+        --kubeconfig {{ kubeconfig_path }}
+        --set ingress.tls.source=letsEncrypt
+        --namespace cattle-system
+        --set hostname=rancher.my.org
+
+    - name: Update Helm repos
+      command: helm repo update
+
+    - name: Replace the Rancher Service
+      kubernetes.core.k8s:
+        state: present
+        force: yes
+        kubeconfig: /etc/rancher/rke2/rke2.yaml
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            annotations:
+              meta.helm.sh/release-name: rancher
+              meta.helm.sh/release-namespace: cattle-system
+            labels:
+              app: rancher
+              app.kubernetes.io/managed-by: Helm
+              chart: rancher-2.7.5
+              heritage: Helm
+              release: rancher
+            name: rancher
+            namespace: cattle-system
+          spec:
+            type: NodePort
+            ports:
+              - name: http
+                port: 80
+                targetPort: 80
+                nodePort: 30080
+              - name: https-internal
+                port: 443
+                targetPort: 444
+                nodePort: 30443
+            selector:
+              app: rancher
+
+    - name: Get Rancher Password
+      shell: /var/lib/rancher/rke2/bin/kubectl --kubeconfig=/etc/rancher/rke2/rke2.yaml get secret --namespace cattle-system bootstrap-secret -o go-template='{% raw %}{{.data.bootstrapPassword|base64decode}}{% endraw %}'
+      register: result
+      retries: 10
+      delay: 30
+      until: result.rc == 0
+      tags:
+        - rancherpw
+    - name: Display Rancher Password
+      debug:
+        var: result.stdout
+      tags:
+        - rancherpw
